@@ -25,6 +25,7 @@ install -m 0755 "$ROOT_DIR/bin/vr-control-gui.sh" "$HOME/bin/vr-control-gui.sh"
 install -m 0755 "$ROOT_DIR/bin/vr-tray.sh" "$HOME/bin/vr-tray.sh"
 install -m 0755 "$ROOT_DIR/bin/quest-watch.sh" "$HOME/bin/quest-watch.sh"
 install -m 0644 "$ROOT_DIR/systemd/vr-stack-control.service" "$HOME/.config/systemd/user/vr-stack-control.service"
+install -m 0644 "$ROOT_DIR/systemd/vr-stack-tray.service" "$HOME/.config/systemd/user/vr-stack-tray.service"
 install -m 0644 "$ROOT_DIR/desktop/vr-control-panel.desktop" "$HOME/.local/share/applications/vr-control-panel.desktop"
 install -m 0644 "$ROOT_DIR/desktop/vr-tray.desktop" "$HOME/.local/share/applications/vr-tray.desktop"
 

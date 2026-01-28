@@ -2,6 +2,9 @@
 set -Eeuo pipefail
 
 SERVICE="vr-stack-control.service"
+TRAY_SERVICE="vr-stack-tray.service"
+APP_TITLE="VR Stack Control"
+
 CFG_DIR="$HOME/.config/vr-stack"
 CFG="$CFG_DIR/stack.conf"
 RUN_LOG="$HOME/.local/share/vr-stack.log"
@@ -11,6 +14,52 @@ mkdir -p "$CFG_DIR"
 PROFILES_DIR="$CFG_DIR/profiles"
 mkdir -p "$PROFILES_DIR"
 
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------------- systemd helpers ----------------
+is_active()  { systemctl --user is-active --quiet "$SERVICE"; }
+is_enabled() { systemctl --user is-enabled --quiet "$SERVICE"; }
+
+status_str()    { is_active && echo "RUNNING" || echo "STOPPED"; }
+autostart_str() { is_enabled && echo "ENABLED" || echo "DISABLED"; }
+
+start_vr()   { systemctl --user start "$SERVICE"; }
+stop_vr()    { systemctl --user stop "$SERVICE"; }
+restart_vr() { systemctl --user restart "$SERVICE"; }
+
+tray_is_active()  { systemctl --user is-active --quiet "$TRAY_SERVICE"; }
+tray_is_enabled() { systemctl --user is-enabled --quiet "$TRAY_SERVICE"; }
+tray_status_str() { tray_is_active && echo "RUNNING" || echo "STOPPED"; }
+tray_autostart_str() { tray_is_enabled && echo "ENABLED" || echo "DISABLED"; }
+
+tray_start()  { systemctl --user start "$TRAY_SERVICE" || true; }
+tray_stop()   { systemctl --user stop "$TRAY_SERVICE" || true; }
+tray_enable() { systemctl --user enable "$TRAY_SERVICE" || true; }
+tray_disable(){ systemctl --user disable "$TRAY_SERVICE" || true; }
+
+toggle_autostart() {
+  if is_enabled; then systemctl --user disable "$SERVICE" || true
+  else systemctl --user enable "$SERVICE" || true
+  fi
+}
+
+# ---------------- connections ----------------
+adb_state() {
+  if ! have adb; then echo "no-adb"; return; fi
+  if adb devices 2>/dev/null | awk 'NR>1 && $2=="device"{found=1} END{exit !found}'; then echo "connected"; return; fi
+  if adb devices 2>/dev/null | awk 'NR>1 && ($2=="unauthorized" || $2=="offline"){found=1} END{exit !found}'; then echo "unauthorized"; return; fi
+  echo "disconnected"
+}
+
+wivrn_state() {
+  local regex="${WIVRN_CONNECTED_REGEX:-connected|connection established|client.*connected|new client|session.*created}"
+  local text
+  text="$(journalctl --user -u "$SERVICE" -n 250 --no-pager 2>/dev/null || true)"
+  [[ -z "$text" ]] && { echo "unknown"; return; }
+  echo "$text" | rg -i -q "$regex" && echo "connected" || echo "disconnected"
+}
+
+# ---------------- profiles ----------------
 list_profiles() { ls -1 "$PROFILES_DIR"/*.conf 2>/dev/null | xargs -n1 basename | sed 's/\.conf$//' || true; }
 
 current_profile_name() {
@@ -23,8 +72,11 @@ current_profile_name() {
 
 ensure_default_profile() {
   if [[ ! -f "$PROFILES_DIR/default.conf" ]]; then
+    # Seed from existing config if present (and not a symlink)
     [[ -f "$CFG" && ! -L "$CFG" ]] && cp -f "$CFG" "$PROFILES_DIR/default.conf" || true
   fi
+
+  # Ensure stack.conf is a symlink to a profile
   if [[ ! -L "$CFG" ]]; then
     rm -f "$CFG"
     ln -sf "$PROFILES_DIR/default.conf" "$CFG"
@@ -35,8 +87,9 @@ switch_profile() {
   ensure_default_profile
   local items choice
   items="$(list_profiles)"
-  [[ -z "$items" ]] && yad --info --title="VR Control Panel" --text="No profiles found." && return 0
-  choice="$(printf "%s\n" $items | yad --list --title="Select Profile" --column="Profile" --height=420 --width=420 --center --button="Select":0 --button="Cancel":1 2>/dev/null)" || return 1
+  [[ -z "$items" ]] && yad --info --title="$APP_TITLE" --text="No profiles found." && return 0
+
+  choice="$(printf "%s\n" $items | yad --list --title="Select Profile" --column="Profile" --height=420 --width=520 --center --button="Select":0 --button="Cancel":1 2>/dev/null)" || return 1
   [[ -z "$choice" ]] && return 0
   ln -sf "$PROFILES_DIR/$choice.conf" "$CFG"
 }
@@ -56,42 +109,17 @@ delete_profile() {
   local items choice cur
   cur="$(current_profile_name)"
   items="$(list_profiles | sed "/^$cur$/d")"
-  [[ -z "$items" ]] && yad --info --title="VR Control Panel" --text="No deletable profiles (current is '$cur')." && return 0
-  choice="$(printf "%s\n" $items | yad --list --title="Delete Profile" --column="Profile" --height=420 --width=420 --center --button="Delete":0 --button="Cancel":1 2>/dev/null)" || return 1
+  [[ -z "$items" ]] && yad --info --title="$APP_TITLE" --text="No deletable profiles (current is '$cur')." && return 0
+
+  choice="$(printf "%s\n" $items | yad --list --title="Delete Profile" --column="Profile" --height=420 --width=520 --center --button="Delete":0 --button="Cancel":1 2>/dev/null)" || return 1
   [[ -z "$choice" ]] && return 0
   rm -f "$PROFILES_DIR/$choice.conf"
 }
 
-have() { command -v "$1" >/dev/null 2>&1; }
-
-is_active() { systemctl --user is-active --quiet "$SERVICE"; }
-is_enabled() { systemctl --user is-enabled --quiet "$SERVICE"; }
-
-status_str() { is_active && echo "RUNNING" || echo "STOPPED"; }
-autostart_str() { is_enabled && echo "ENABLED" || echo "DISABLED"; }
-
-adb_state() {
-  if ! command -v adb >/dev/null 2>&1; then echo "no-adb"; return; fi
-  if adb devices 2>/dev/null | awk 'NR>1 && $2=="device"{found=1} END{exit !found}'; then echo "connected"; return; fi
-  if adb devices 2>/dev/null | awk 'NR>1 && ($2=="unauthorized" || $2=="offline"){found=1} END{exit !found}'; then echo "unauthorized"; return; fi
-  echo "disconnected"
-}
-
-wivrn_state() {
-  local regex="${WIVRN_CONNECTED_REGEX:-connected|connection established|client.*connected|new client|session.*created}"
-  local text
-  text="$(journalctl --user -u "$SERVICE" -n 250 --no-pager 2>/dev/null || true)"
-  [[ -z "$text" ]] && { echo "unknown"; return; }
-  echo "$text" | rg -i -q "$regex" && echo "connected" || echo "disconnected"
-}
-
-strip_exec_placeholders() {
-  # Remove common DesktopEntry placeholders like %u %U %f %F etc.
-  sed -E "s/[[:space:]]%[a-zA-Z]//g; s/[[:space:]]%[0-9]?[a-zA-Z]//g" <<<"$1"
-}
+# ---------------- app picker ----------------
+strip_exec_placeholders() { sed -E "s/[[:space:]]%[0-9]?[a-zA-Z]//g" <<<"$1"; }
 
 desktop_apps_list() {
-  # Output lines: Name<TAB>Exec<TAB>DesktopFile
   local dirs=("$HOME/.local/share/applications" "/usr/share/applications")
   for d in "${dirs[@]}"; do
     [[ -d "$d" ]] || continue
@@ -110,9 +138,7 @@ desktop_apps_list() {
 path_cmds_list() {
   local cmds=( slimevr wayvr wivrn-server monado-service envision steamvr )
   for c in "${cmds[@]}"; do
-    if command -v "$c" >/dev/null 2>&1; then
-      printf "%s\t%s\n" "$c (PATH)" "$c"
-    fi
+    command -v "$c" >/dev/null 2>&1 && printf "%s\t%s\n" "$c (PATH)" "$c"
   done
 }
 
@@ -134,8 +160,8 @@ pick_from_menu() {
   menu="$(build_menu)"
   values="$(cut -d'|' -f1 <<<"$menu" | paste -sd',' -)"
 
-  choice="$(yad --title="VR Control Panel" \
-    --form --center --width=940 --height=240 --borders=12 \
+  choice="$(yad --title="$APP_TITLE" \
+    --form --center --width=960 --height=250 --borders=12 \
     --field="$title:CB" "$values" \
     --field="Custom command (overrides dropdown):" "$current_exec" \
     --button="OK":0 --button="Cancel":1 2>/dev/null)" || return 1
@@ -151,7 +177,9 @@ pick_from_menu() {
   awk -F'|' -v lbl="$picked_label" '$1==lbl {print $2; exit}' <<<"$menu"
 }
 
+# ---------------- config ----------------
 load_cfg() {
+  # Defaults
   TRACK_CMD="/opt/slimevr/slimevr"
   TRACK_READY_PGREP="slimevr\.jar"
   SERVER_CMD="wivrn-server"
@@ -160,10 +188,7 @@ load_cfg() {
   VR_PGREP="(^|/)(wayvr)(\\s|$)"
   OPENXR_JSON="/usr/share/openxr/1/openxr_wivrn.json"
 
-  if [[ -f "$CFG" ]]; then
-    # shellcheck disable=SC1090
-    source "$CFG"
-  fi
+  [[ -f "$CFG" ]] && source "$CFG" || true
 }
 
 save_cfg() {
@@ -184,8 +209,9 @@ EOF2
 }
 
 edit_patterns() {
+  load_cfg
   local out
-  out="$(yad --title="VR Control Panel" --form --center --width=940 --height=270 --borders=12 \
+  out="$(yad --title="$APP_TITLE" --form --center --width=960 --height=270 --borders=12 \
     --field="Tracking ready pgrep (blank = no wait):" "${TRACK_READY_PGREP:-}" \
     --field="Server pgrep pattern:" "${SERVER_PGREP:-}" \
     --field="VR app pgrep pattern:" "${VR_PGREP:-}" \
@@ -194,8 +220,31 @@ edit_patterns() {
   TRACK_READY_PGREP="$(cut -d'|' -f1 <<<"$out")"
   SERVER_PGREP="$(cut -d'|' -f2 <<<"$out")"
   VR_PGREP="$(cut -d'|' -f3 <<<"$out")"
+  save_cfg
 }
 
+set_tracking() {
+  load_cfg
+  TRACK_CMD="$(pick_from_menu "Tracking app" "${TRACK_CMD:-}")" || return 0
+  [[ "$TRACK_CMD" == *slimevr* ]] && TRACK_READY_PGREP="slimevr\.jar"
+  save_cfg
+}
+
+set_server() {
+  load_cfg
+  SERVER_CMD="$(pick_from_menu "Server app" "${SERVER_CMD:-}")" || return 0
+  [[ "$SERVER_CMD" == "wivrn-server" ]] && SERVER_PGREP="wivrn-server"
+  save_cfg
+}
+
+set_vr_app() {
+  load_cfg
+  VR_CMD="$(pick_from_menu "VR app (OpenXR client)" "${VR_CMD:-}")" || return 0
+  [[ "$VR_CMD" == "wayvr" ]] && VR_PGREP="(^|/)(wayvr)(\\s|$)"
+  save_cfg
+}
+
+# ---------------- debug ----------------
 copy_debug_bundle() {
   local tmp
   tmp="$(mktemp)"
@@ -204,7 +253,11 @@ copy_debug_bundle() {
     echo "Timestamp: $(date -Is)"
     echo "Host: $(hostname)"
     echo
-    echo "--- config ($CFG) ---"
+    echo "--- Profile ---"
+    echo "Current profile: $(current_profile_name)"
+    echo "Config file: $(readlink -f "$CFG" 2>/dev/null || echo "$CFG")"
+    echo
+    echo "--- config ---"
     [[ -f "$CFG" ]] && cat "$CFG" || echo "(missing)"
     echo
     echo "--- systemd status ---"
@@ -212,6 +265,10 @@ copy_debug_bundle() {
     echo
     echo "--- systemd show ---"
     systemctl --user show -p ActiveState -p SubState -p Result "$SERVICE" || true
+    echo
+    echo "--- connections ---"
+    echo "Quest ADB: $(adb_state)"
+    echo "WiVRn: $(wivrn_state)"
     echo
     echo "--- processes ---"
     pgrep -af "slimevr\.jar|wivrn-server|(^|/)(wayvr)(\\s|$)|/opt/slimevr/slimevr|vr-stack-run\.sh" || echo "(none)"
@@ -225,106 +282,138 @@ copy_debug_bundle() {
 
   if have xclip; then
     xclip -selection clipboard < "$tmp" || true
-    yad --info --title="VR Control Panel" --text="Debug info copied to clipboard."
+    yad --info --title="$APP_TITLE" --text="Debug info copied to clipboard."
   else
-    yad --text-info --title="VR Debug Bundle" --filename="$tmp" --width=980 --height=650
+    yad --text-info --title="$APP_TITLE — Debug Bundle" --filename="$tmp" --width=980 --height=650
   fi
   rm -f "$tmp"
 }
 
 show_logs() {
   journalctl --user -u "$SERVICE" -n 250 --no-pager 2>/dev/null | \
-    yad --text-info --title="VR Logs (journalctl)" --width=980 --height=650 --wrap
+    yad --text-info --title="$APP_TITLE — Logs (journalctl)" --width=980 --height=650 --wrap
 }
 
-load_cfg
+open_runner_log() {
+  [[ -f "$RUN_LOG" ]] || { yad --info --title="$APP_TITLE" --text="No runner log yet:\n$RUN_LOG"; return 0; }
+  if have xdg-open; then
+    xdg-open "$RUN_LOG" >/dev/null 2>&1 || true
+  else
+    yad --text-info --title="$APP_TITLE — Runner log" --width=980 --height=650 --wrap --filename="$RUN_LOG"
+  fi
+}
+
+# ---------------- action dispatcher (for tray / future) ----------------
+if [[ "${1:-}" == "--do" ]]; then
+  shift || true
+  case "${1:-}" in
+    start) start_vr ;;
+    tray-start) tray_start ;;
+    tray-stop) tray_stop ;;
+    tray-enable) tray_enable ;;
+    tray-disable) tray_disable ;;
+    stop) stop_vr ;;
+    restart) restart_vr ;;
+    autostart) toggle_autostart ;;
+    set-tracking) set_tracking ;;
+    set-server) set_server ;;
+    set-vr) set_vr_app ;;
+    patterns) edit_patterns ;;
+    profile-select) switch_profile ;;
+    profile-saveas) save_current_as_profile ;;
+    profile-delete) delete_profile ;;
+    logs) show_logs ;;
+    debug-bundle) copy_debug_bundle ;;
+    open-runlog) open_runner_log ;;
+    *) : ;;
+  esac
+  exit 0
+fi
+
+# ---------------- tabbed UI ----------------
 ensure_default_profile
 load_cfg
 
 while true; do
-  state="$(status_str)"
-  auto="$(autostart_str)"
-
-  choice="$(yad --title="VR Control Panel" --center --width=760 --height=390 --borders=12 \
-    --list --column="Action" \
-    "Status: $state" \
-    "Quest ADB: $(adb_state) | WiVRn: $(wivrn_state)" \
-    "Autostart on login: $auto" \
-    "Profile: $(current_profile_name)" \
-    "Select profile…" \
-    "Save current as new profile…" \
-    "Delete a profile…" \
-    "Set Tracking app…" \
-    "Set Server app…" \
-    "Set VR app…" \
-    "Edit readiness/pgrep patterns…" \
-    "Save config" \
-    "Start VR" \
-    "Stop VR" \
-    "Restart VR" \
-    "Toggle autostart" \
-    "View logs" \
-    "Copy debug bundle" \
-    "Quit" \
-    --button="Select":0 --button="Close":1 2>/dev/null)" || exit 0
-
-  case "$choice" in
-    "Select profile…")
-      switch_profile || true
-      ;;
-    "Save current as new profile…")
-      save_current_as_profile || true
-      ;;
-    "Delete a profile…")
-      delete_profile || true
-      ;;
-    "Set Tracking app…")
-      TRACK_CMD="$(pick_from_menu "Tracking app" "${TRACK_CMD:-}")" || continue
-      [[ "$TRACK_CMD" == *slimevr* ]] && TRACK_READY_PGREP="slimevr\.jar"
-      ;;
-    "Set Server app…")
-      SERVER_CMD="$(pick_from_menu "Server app" "${SERVER_CMD:-}")" || continue
-      [[ "$SERVER_CMD" == "wivrn-server" ]] && SERVER_PGREP="wivrn-server"
-      ;;
-    "Set VR app…")
-      VR_CMD="$(pick_from_menu "VR app (OpenXR client)" "${VR_CMD:-}")" || continue
-      [[ "$VR_CMD" == "wayvr" ]] && VR_PGREP="(^|/)(wayvr)(\\s|$)"
-      ;;
-    "Edit readiness/pgrep patterns…")
-      edit_patterns || true
-      ;;
-    "Save config")
-      save_cfg
-      yad --info --title="VR Control Panel" --text="Saved:\n$CFG"
-      ;;
-    "Start VR")
-      save_cfg
-      systemctl --user start "$SERVICE"
-      ;;
-    "Stop VR")
-      systemctl --user stop "$SERVICE"
-      ;;
-    "Restart VR")
-      save_cfg
-      systemctl --user restart "$SERVICE"
-      ;;
-    "Toggle autostart")
-      if is_enabled; then
-        systemctl --user disable "$SERVICE" || true
-      else
-        systemctl --user enable "$SERVICE" || true
-      fi
-      ;;
-    "View logs")
-      show_logs
-      ;;
-    "Copy debug bundle")
-      copy_debug_bundle
-      ;;
-    "Quit"|*)
-      exit 0
-      ;;
-  esac
+  STATE="$(status_str)"
+  AUTO="$(autostart_str)"
+  PROF="$(current_profile_name)"
+  QUEST="$(adb_state)"
+  WIVRN="$(wivrn_state)"
 
   load_cfg
+
+  CONTROL_TEXT=$(
+    cat <<TXT
+<b>Status</b>
+Service: <b>$STATE</b>
+Autostart: <b>$AUTO</b>
+Profile: <b>$PROF</b>
+Tray: <b>$(tray_status_str)</b> (Autostart: <b>$(tray_autostart_str)</b>)
+
+<b>Connections</b>
+Quest (ADB): <b>$QUEST</b>
+WiVRn: <b>$WIVRN</b>
+TXT
+  )
+
+  APPS_TEXT=$(
+    cat <<TXT
+<b>Current app config (active profile)</b>
+
+Tracking:
+  CMD: <b>${TRACK_CMD:-}</b>
+  READY: <b>${TRACK_READY_PGREP:-}</b>
+
+Server:
+  CMD: <b>${SERVER_CMD:-}</b>
+  PGREP: <b>${SERVER_PGREP:-}</b>
+
+VR App:
+  CMD: <b>${VR_CMD:-}</b>
+  PGREP: <b>${VR_PGREP:-}</b>
+TXT
+  )
+
+  yad --title="$APP_TITLE" \
+    --width=980 --height=640 --center --borders=12 \
+    --notebook \
+    --tab="Control" \
+      --form \
+        --field="":LBL "$CONTROL_TEXT" \
+        --field="":BTN "Start!bash -lc \"$HOME/bin/vr-control-gui.sh --do start\"" \
+        --field="":BTN "Stop!bash -lc \"$HOME/bin/vr-control-gui.sh --do stop\"" \
+        --field="":BTN "Restart!bash -lc \"$HOME/bin/vr-control-gui.sh --do restart\"" \
+        --field="":BTN "Toggle autostart!bash -lc \"$HOME/bin/vr-control-gui.sh --do autostart\"" \
+        --field="":BTN "Start tray!bash -lc \"$HOME/bin/vr-control-gui.sh --do tray-start\"" \
+        --field="":BTN "Stop tray!bash -lc \"$HOME/bin/vr-control-gui.sh --do tray-stop\"" \
+        --field="":BTN "Enable tray autostart!bash -lc \"$HOME/bin/vr-control-gui.sh --do tray-enable\"" \
+        --field="":BTN "Disable tray autostart!bash -lc \"$HOME/bin/vr-control-gui.sh --do tray-disable\"" \
+    --tab="Apps" \
+      --form \
+        --field="":LBL "$APPS_TEXT" \
+        --field="":BTN "Set Tracking…!bash -lc \"$HOME/bin/vr-control-gui.sh --do set-tracking\"" \
+        --field="":BTN "Set Server…!bash -lc \"$HOME/bin/vr-control-gui.sh --do set-server\"" \
+        --field="":BTN "Set VR App…!bash -lc \"$HOME/bin/vr-control-gui.sh --do set-vr\"" \
+        --field="":BTN "Edit pgrep patterns…!bash -lc \"$HOME/bin/vr-control-gui.sh --do patterns\"" \
+        --field="":BTN "Save config!bash -lc \"$HOME/bin/vr-control-gui.sh --do save\"" \
+    --tab="Profiles" \
+      --form \
+        --field="":LBL "<b>Profiles</b>\nCurrent: <b>$PROF</b>\n\nProfiles live in:\n$PROFILES_DIR" \
+        --field="":BTN "Select profile…!bash -lc \"$HOME/bin/vr-control-gui.sh --do profile-select\"" \
+        --field="":BTN "Save current as new…!bash -lc \"$HOME/bin/vr-control-gui.sh --do profile-saveas\"" \
+        --field="":BTN "Delete a profile…!bash -lc \"$HOME/bin/vr-control-gui.sh --do profile-delete\"" \
+    --tab="Debug" \
+      --form \
+        --field="":LBL "<b>Debug tools</b>\n\nService logs come from journalctl.\nRunner log: $RUN_LOG" \
+        --field="":BTN "View logs…!bash -lc \"$HOME/bin/vr-control-gui.sh --do logs\"" \
+        --field="":BTN "Copy debug bundle…!bash -lc \"$HOME/bin/vr-control-gui.sh --do debug-bundle\"" \
+        --field="":BTN "Open runner log…!bash -lc \"$HOME/bin/vr-control-gui.sh --do open-runlog\"" \
+    --button="Refresh":252 \
+    --button="Close":1 \
+    2>/dev/null
+
+  rc=$?
+  [[ "$rc" == "252" ]] && continue
+  exit 0
 done

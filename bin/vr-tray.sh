@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 SERVICE="vr-stack-control.service"
+TRAY_SERVICE="vr-stack-tray.service"
 APP_TITLE="VR Stack Control"
 
 WATCH_PIDFILE="$HOME/.local/share/vr-stack/quest-watch.pid"
@@ -41,7 +42,6 @@ adb_state() {
 }
 
 wivrn_state() {
-  # Heuristic: look for connection-ish phrases in recent service logs.
   local regex="${WIVRN_CONNECTED_REGEX:-connected|connection established|client.*connected|new client|session.*created}"
   local text
   text="$(journalctl --user -u "$SERVICE" -n 250 --no-pager 2>/dev/null || true)"
@@ -80,7 +80,19 @@ show_status() {
   local a="DISABLED"; is_enabled && a="ENABLED"
   local q; q="$(adb_state)"
   local w; w="$(wivrn_state)"
-  yad --info --title="$APP_TITLE" --text="Service: $s\nAutostart: $a\nQuest ADB: $q\nWiVRn client: $w"
+  local watcher="OFF"; watch_running && watcher="ON"
+  yad --info --title="$APP_TITLE" --text="Service: $s\nAutostart: $a\nTray watcher: $watcher\nQuest ADB: $q\nWiVRn client: $w"
+}
+
+quit_tray() {
+  stop_watch || true
+
+  # If launched by systemd, stop the unit so it doesn't respawn.
+  if systemctl --user is-active --quiet "$TRAY_SERVICE"; then
+    systemctl --user stop "$TRAY_SERVICE" || true
+  fi
+
+  exit 0
 }
 
 menu() {
@@ -96,14 +108,14 @@ Status… (Service: $s / Quest: $q / WiVRn: $w)!show_status
 Start VR!start_vr
 Stop VR!stop_vr
 Restart VR!restart_vr
-Autostart: $a!toggle_autostart
+Autostart VR: $a!toggle_autostart
 Watcher: $watcher (Quest + WiVRn)!toggle_watch
 View logs…!show_logs
-Quit!quit
+Quit tray icon!quit_tray
 MENU
 }
 
-export -f open_panel start_vr stop_vr restart_vr toggle_autostart show_logs show_status toggle_watch
+export -f open_panel start_vr stop_vr restart_vr toggle_autostart show_logs show_status toggle_watch quit_tray
 
 yad --notification \
   --text="$APP_TITLE" \

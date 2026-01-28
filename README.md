@@ -1,5 +1,3 @@
-**Current version:** v0.2.0
-
 # VR Stack Control
 
 A small, modular **Linux VR stack launcher + control panel** that manages your VR session using **systemd --user**.
@@ -13,6 +11,8 @@ It’s designed for stacks like:
 …but it’s not hard-coded to any one setup — you pick what to run from the GUI.
 
 ## What this does
+
+- **Tabbed GUI** (Control / Apps / Profiles / Debug)
 
 - Starts your chosen apps in the right order: **Tracking → Server → VR app**
 - Stops everything cleanly (no orphan processes)
@@ -135,3 +135,15 @@ systemctl --user disable vr-stack-control.service
 ## License
 
 MIT (see `LICENSE`).
+
+
+## Tray icon service
+
+The tray icon can run as a **systemd --user** service:
+
+- Start: `systemctl --user start vr-stack-tray.service`
+- Stop: `systemctl --user stop vr-stack-tray.service`
+- Autostart: `systemctl --user enable vr-stack-tray.service`
+- Disable autostart: `systemctl --user disable vr-stack-tray.service`
+
+The Control Panel also includes tray controls.

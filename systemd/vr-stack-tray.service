@@ -1,0 +1,13 @@
+[Unit]
+Description=VR Stack Control Tray Icon
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env bash -lc "%h/bin/vr-tray.sh"
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
