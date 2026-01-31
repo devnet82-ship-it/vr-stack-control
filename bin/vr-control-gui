@@ -1,0 +1,1151 @@
+#!/usr/bin/env python3
+import os
+import time
+import json
+import subprocess
+import shlex
+from pathlib import Path
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+
+APP_VERSION = "v0.6.21"
+
+STACK_SERVICE = "vr-stack-control.service"
+
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home()/".config")) / "vr-stack"
+STACK_CONF = CONFIG_DIR / "stack.conf"
+PROFILES_DIR = CONFIG_DIR / "profiles"
+GUI_STATE = CONFIG_DIR / "gui_state.json"
+
+DEFAULTS = {
+    "tracking_cmd": "/opt/slimevr/slimevr",
+    "server_cmd": "wivrn-server",
+    "vr_cmd": "wayvr",
+    "tracking_ready": "slimevr\\.jar",
+    "server_pgrep": "wivrn-server",
+    "vr_pgrep": "(^|/)(wayvr)(\\s|$)",
+    "profile": "default",
+}
+
+
+def ensure_dirs():
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def read_kv(path: Path):
+    """Read a very small KEY=VALUE config file.
+
+    Values may be plain (no spaces/specials) or quoted with single/double quotes.
+    We strip surrounding quotes for convenience.
+    """
+    data = {}
+    if not path.exists():
+        return data
+    for raw in path.read_text(errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        # Strip surrounding quotes if present
+        if len(v) >= 2 and ((v[0] == v[-1] == "'") or (v[0] == v[-1] == '"')):
+            q = v[0]
+            v = v[1:-1]
+            if q == "'":
+                pass
+        data[k] = v
+    return data
+
+
+
+
+
+def _bash_single_quote(val: str) -> str:
+    """Return a bash-safe single-quoted string."""
+    # Escape for single quotes inside single quotes: 'foo'"'"'bar'
+    return "'" + val.replace("'", "'\"'\"'") + "'"
+
+def write_kv(path: Path, data: dict):
+    """Write KEY=VALUE config as bash-safe assignments."""
+    lines = []
+    for k, v in data.items():
+        if v is None:
+            continue
+        v = str(v)
+        # Always quote to keep bash 'source' safe (regexes, pipes, spaces, etc.)
+        lines.append(f"{k}={_bash_single_quote(v)}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+
+def cfg_load():
+
+
+
+    cfg = DEFAULTS.copy()
+    raw = read_kv(STACK_CONF)
+    # allow either snake_case or legacy keys
+    mapping = {
+        "tracking_cmd": ["tracking_cmd", "TRACKING_CMD"],
+        "server_cmd": ["server_cmd", "SERVER_CMD"],
+        "vr_cmd": ["vr_cmd", "VR_CMD"],
+        "tracking_ready": ["tracking_ready", "TRACKING_READY"],
+        "server_pgrep": ["server_pgrep", "SERVER_PGREP"],
+        "vr_pgrep": ["vr_pgrep", "VR_PGREP"],
+        "profile": ["profile", "PROFILE"],
+    }
+    for key, aliases in mapping.items():
+        for a in aliases:
+            if a in raw and raw[a] != "":
+                cfg[key] = raw[a]
+                break
+    return cfg
+
+
+def cfg_save(cfg: dict):
+    # write using lower-case keys
+    write_kv(STACK_CONF, cfg)
+
+
+def state_load():
+    if GUI_STATE.exists():
+        try:
+            return json.loads(GUI_STATE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def state_save(state: dict):
+    GUI_STATE.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+
+def run_cmd(args, timeout=12):
+    try:
+        r = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+        return r.returncode, (r.stdout or "").strip()
+    except Exception as e:
+        return 1, str(e)
+
+
+def systemctl_user(*args):
+    return run_cmd(["systemctl", "--user", *args])
+
+def pgrep_first(pattern: str):
+    # Return (pid, cmdline) for first matching process, or None.
+    rc, out = run_cmd(["pgrep", "-af", pattern], timeout=2)
+    if rc != 0:
+        return None
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    ln = lines[0]
+    parts = ln.split(maxsplit=1)
+    pid = parts[0]
+    cmd = parts[1] if len(parts) > 1 else ""
+    return pid, cmd
+
+
+
+def pkill_pattern(pattern: str) -> int:
+    try:
+        r = subprocess.run(["pkill", "-f", pattern], capture_output=True, text=True)
+        return r.returncode
+    except FileNotFoundError:
+        return 127
+
+
+def stop_stack_components(cfg: dict) -> None:
+    # Stop in reverse order so dependencies unwind cleanly.
+    vr_pat = cfg.get("vr_pgrep", r"(^|/)(wayvr)(\s|$)")
+    srv_pat = cfg.get("server_pgrep", r"wivrn-server")
+    trk_pat = cfg.get("tracking_ready", r"slimevr\.jar")
+
+    for pat in (vr_pat, srv_pat, trk_pat):
+        pkill_pattern(pat)
+
+def open_in_editor(path: Path):
+    editor = os.environ.get("EDITOR")
+    if editor:
+        subprocess.Popen([editor, str(path)])
+        return
+    # try common GUI editors, then fall back to xdg-open
+    for cmd in ("gedit", "gnome-text-editor", "kate", "mousepad"):
+        if shutil_which(cmd):
+            subprocess.Popen([cmd, str(path)])
+            return
+    subprocess.Popen(["xdg-open", str(path)])
+
+
+def shutil_which(cmd: str):
+    for p in os.environ.get("PATH", "").split(os.pathsep):
+        c = Path(p) / cmd
+        if c.exists() and os.access(c, os.X_OK):
+            return str(c)
+    return None
+
+
+def info_dialog(parent, title, body):
+    d = Gtk.MessageDialog(parent, 0, Gtk.MessageType.INFO, Gtk.ButtonsType.OK, title)
+    d.format_secondary_text(body)
+    d.run()
+    d.destroy()
+
+
+def confirm_dialog(parent, title, body):
+    d = Gtk.MessageDialog(parent, 0, Gtk.MessageType.QUESTION, Gtk.ButtonsType.OK_CANCEL, title)
+    d.format_secondary_text(body)
+    rc = d.run()
+    d.destroy()
+    return rc == Gtk.ResponseType.OK
+
+
+
+# --- small UI helpers ---
+
+def markup_escape(text: str) -> str:
+    # Escape text for Pango markup.
+    try:
+        return GLib.markup_escape_text(text)
+    except Exception:
+        t = text or ""
+        return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def cmd_display_name(cmd: str, fallback: str) -> str:
+    # Friendly name for a command: basename of first token.
+    cmd = (cmd or "").strip()
+    if not cmd:
+        return fallback
+    try:
+        parts = shlex.split(cmd)
+    except Exception:
+        parts = cmd.split()
+    if not parts:
+        return fallback
+    exe = (parts[0] or "").strip()
+    base = os.path.basename(exe)
+    return base or fallback
+
+class VRControlApp(Gtk.Window):
+    def __init__(self):
+        super().__init__(title=f"VR Stack Control {APP_VERSION}")
+        ensure_dirs()
+
+        self.cfg = cfg_load()
+        self.state = state_load()
+
+        self.set_default_size(920, 560)
+        self.set_border_width(10)
+
+        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.add(root)
+
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
+        self.stack.set_transition_duration(180)
+
+        sidebar = Gtk.StackSidebar()
+        sidebar.set_stack(self.stack)
+        sidebar.set_size_request(200, -1)
+
+        # Left: sidebar (tabs). Right: quick controls + page content.
+        root.pack_start(sidebar, False, False, 0)
+
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        right.set_hexpand(True)
+        right.set_vexpand(True)
+        root.pack_start(right, True, True, 0)
+
+        self.quickbar = self.build_quick_controls()
+        right.pack_start(self.quickbar, False, False, 0)
+        right.pack_start(self.stack, True, True, 0)
+
+        self.status_view = self.build_status_view()
+        self.apps_view = self.build_apps_view()
+        self.profiles_view = self.build_profiles_view()
+        self.debug_view = self.build_debug_view()
+
+        self.stack.add_titled(self.status_view, "status", "Status")
+        self.stack.add_titled(self.apps_view, "apps", "Apps & Settings")
+        self.stack.add_titled(self.profiles_view, "profiles", "Profiles")
+        self.stack.add_titled(self.debug_view, "debug", "Debug")
+
+        # Live status: keep it fresh automatically so the running-app list
+        # and indicator lights update without needing manual clicks.
+        self._alive = True
+        self.connect("destroy", self.on_destroy)
+        self.refresh_status()
+
+        # GUI-scoped autostart: if enabled, start the stack when this window opens.
+        try:
+            if bool(self.state.get('autostart_on_open', False)):
+                systemctl_user('start', STACK_SERVICE)
+        except Exception:
+            pass
+        GLib.timeout_add_seconds(2, self._auto_refresh)
+
+        self.show_all()
+
+        # Update labels that depend on the current command names.
+        self.update_display_names()
+
+
+    def update_display_names(self) -> None:
+        """Update UI labels to reflect the configured command names."""
+        try:
+            self.name_tracking = cmd_display_name(self.cfg.get("tracking_cmd", ""), "Tracking")
+            self.name_server = cmd_display_name(self.cfg.get("server_cmd", ""), "Server")
+            self.name_vr = cmd_display_name(self.cfg.get("vr_cmd", ""), "VR App")
+
+            if getattr(self, "lbl_tracking_name", None) is not None:
+                self.lbl_tracking_name.set_text(f"Tracking ({self.name_tracking})")
+            if getattr(self, "lbl_server_name", None) is not None:
+                self.lbl_server_name.set_text(f"Server ({self.name_server})")
+            if getattr(self, "lbl_vr_name", None) is not None:
+                self.lbl_vr_name.set_text(f"VR App ({self.name_vr})")
+
+            if getattr(self, "lbl_order_note", None) is not None:
+                self.lbl_order_note.set_text(
+                    f"Expected order: Tracking → Server → VR App  ( {self.name_tracking} → {self.name_server} → {self.name_vr} )"
+                )
+        except Exception:
+            # Never crash the app because labels are missing.
+            pass
+
+    def on_destroy(self, *_args):
+        self._alive = False
+
+    def _auto_refresh(self):
+        """Periodic UI refresh (runs on the GTK main loop)."""
+        if not getattr(self, "_alive", False):
+            return False
+        try:
+            self.refresh_status()
+        except Exception:
+            # Never crash the whole app because a refresh query failed.
+            pass
+        return True
+
+
+
+
+
+
+    def toast(self, msg: str, seconds: int = 4):
+        """Lightweight status message without popups.
+
+        We temporarily append the message to the window title, then restore.
+        """
+        try:
+            base = f"VR Stack Control {APP_VERSION}"
+            self.set_title(f"{base} — {msg}")
+
+            def _restore():
+                try:
+                    self.set_title(base)
+                except Exception:
+                    pass
+                return False
+
+            GLib.timeout_add_seconds(max(1, int(seconds)), _restore)
+        except Exception:
+            pass
+
+
+    # ------------- Quick controls (always visible) -------------
+    def build_quick_controls(self):
+        _toggle = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        _toggle.set_margin_bottom(4)
+
+        title = Gtk.Label(xalign=0)
+        title.set_markup("<b>Stack control</b>")
+        _toggle.pack_start(title, False, False, 0)
+
+        self.lbl_quick_state = Gtk.Label(xalign=0)
+        self.lbl_quick_state.set_text("🔴 Stopped")
+        _toggle.pack_start(self.lbl_quick_state, False, False, 0)
+
+        _toggle.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 6)
+
+        self.btn_quick_start = Gtk.Button(label="Start")
+        self.btn_quick_stop = Gtk.Button(label="Stop")
+        self.btn_quick_start.connect("clicked", lambda *_: self.on_quick_start())
+        self.btn_quick_stop.connect("clicked", lambda *_: self.on_quick_stop())
+        _toggle.pack_start(self.btn_quick_start, False, False, 0)
+        _toggle.pack_start(self.btn_quick_stop, False, False, 0)
+
+        self.btn_quick_autostart = Gtk.ToggleButton(label="Autostart")
+        self.btn_quick_autostart.set_tooltip_text("Start VR stack automatically when this control panel opens (not on boot)")
+        self.btn_quick_autostart.connect("toggled", lambda *_: self.on_quick_autostart_toggled())
+        _toggle.pack_start(self.btn_quick_autostart, False, False, 0)
+
+        # Beginner-friendly hint
+        hint = Gtk.Label(xalign=0)
+        hint.set_line_wrap(True)
+        hint.set_max_width_chars(70)
+        hint.set_markup(
+            "<span size='small' foreground='#777'>"
+            "Starts/stops the VR stack in order: Tracking → Server → VR App (systemd --user)."
+            "</span>"
+        )
+
+        wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        wrap.pack_start(_toggle, False, False, 0)
+        wrap.pack_start(hint, False, False, 0)
+        return wrap
+
+    def update_quick_controls(self, svc_active: bool):
+        if svc_active:
+            self.lbl_quick_state.set_text("🟢 Running")
+            self.btn_quick_start.set_sensitive(False)
+            self.btn_quick_stop.set_sensitive(True)
+        else:
+            self.lbl_quick_state.set_text("🔴 Stopped")
+            self.btn_quick_start.set_sensitive(True)
+            self.btn_quick_stop.set_sensitive(False)
+
+    def on_quick_start(self):
+        # systemctl_user() returns (rc:int, combined_output:str)
+        rc, out = systemctl_user("start", STACK_SERVICE)
+        if rc == 0:
+            self.toast("Starting…")
+        else:
+            # systemd sends errors on stderr, but we capture combined output.
+            msg = out.strip() or "unknown error"
+            self.toast(f"Start failed: {msg}")
+        self.refresh_status()
+
+    def on_quick_stop(self):
+        # Stop should always stop the actual processes, even if the systemd unit is oneshot.
+        rc, out = systemctl_user("stop", STACK_SERVICE)
+        stop_stack_components(self.cfg)
+
+        if rc == 0:
+            self.toast("Stopping…")
+        else:
+            msg = out.strip() or "unknown error"
+            self.toast(f"Stop requested (systemd said: {msg}).")
+        self.refresh_status()
+
+    def on_quick_autostart_toggled(self):
+        # Avoid recursion when refresh_status updates the toggle.
+        if getattr(self, '_updating_autostart', False):
+            return
+        enable = bool(self.btn_quick_autostart.get_active())
+        # GUI-scoped autostart: we do NOT systemctl enable/disable.
+        self.state['autostart_on_open'] = enable
+        state_save(self.state)
+        if enable:
+            # Start immediately on toggle-on (best effort).
+            rc, out = systemctl_user('start', STACK_SERVICE)
+            self.toast('Autostart on open enabled (starting now)…' if rc == 0 else f'Start failed: {out}')
+        else:
+            self.toast('Autostart on open disabled')
+        self.refresh_status()
+
+    # ---------------- Status ----------------
+    def build_status_view(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+
+        header = self.section_header("Live status")
+        box.pack_start(header, False, False, 0)
+
+        grid = Gtk.Grid(column_spacing=10, row_spacing=8)
+        box.pack_start(grid, False, False, 0)
+
+        self.lbl_service = Gtk.Label(xalign=0)
+        self.lbl_autostart = Gtk.Label(xalign=0)
+        self.lbl_profile = Gtk.Label(xalign=0)
+
+        self._grid_row(grid, 0, "Stack service:", self.lbl_service)
+        self._grid_row(grid, 1, "Start on app open:", self.lbl_autostart)
+        self._grid_row(grid, 2, "Active profile:", self.lbl_profile)
+
+        btn_row = Gtk.Box(spacing=10)
+        box.pack_start(btn_row, False, False, 0)
+
+        btn_refresh = Gtk.Button(label="Refresh")
+        btn_refresh.set_image(Gtk.Image.new_from_icon_name("view-refresh", Gtk.IconSize.BUTTON))
+        btn_refresh.set_always_show_image(True)
+        btn_refresh.connect("clicked", lambda *_: self.refresh_status())
+
+        btn_row.pack_start(btn_refresh, False, False, 0)
+
+        # Stack processes (live)
+        proc_header = self.section_header("Running apps (detected)")
+        box.pack_start(proc_header, False, False, 0)
+
+        proc_grid = Gtk.Grid(column_spacing=12, row_spacing=8)
+        proc_grid.set_hexpand(True)
+
+        # column headers
+        h1 = self.small_muted("Component")
+        h2 = self.small_muted("Expected order")
+        h3 = self.small_muted("Detected right now")
+        proc_grid.attach(h1, 0, 0, 1, 1)
+        proc_grid.attach(h2, 1, 0, 1, 1)
+        proc_grid.attach(h3, 2, 0, 1, 1)
+
+        self.lbl_tracking_proc = self.value_label("…")
+        self.lbl_server_proc = self.value_label("…")
+        self.lbl_vr_proc = self.value_label("…")
+
+        self.lbl_tracking_name = self.small_muted("Tracking")
+        proc_grid.attach(self.lbl_tracking_name, 0, 1, 1, 1)
+        proc_grid.attach(self.small_muted("1"), 1, 1, 1, 1)
+        proc_grid.attach(self.lbl_tracking_proc, 2, 1, 1, 1)
+
+        self.lbl_server_name = self.small_muted("Server")
+        proc_grid.attach(self.lbl_server_name, 0, 2, 1, 1)
+        proc_grid.attach(self.small_muted("2"), 1, 2, 1, 1)
+        proc_grid.attach(self.lbl_server_proc, 2, 2, 1, 1)
+
+        self.lbl_vr_name = self.small_muted("VR App")
+        proc_grid.attach(self.lbl_vr_name, 0, 3, 1, 1)
+        proc_grid.attach(self.small_muted("3"), 1, 3, 1, 1)
+        proc_grid.attach(self.lbl_vr_proc, 2, 3, 1, 1)
+
+        self.lbl_order_note = self.small_muted("")
+        self.lbl_order_note.set_line_wrap(True)
+        proc_grid.attach(self.lbl_order_note, 0, 4, 3, 1)
+
+        box.pack_start(proc_grid, False, False, 0)
+
+        hint = Gtk.Label(xalign=0)
+        hint.set_line_wrap(True)
+        hint.set_text(
+            "Tip: If the stack won't start from the desktop, check that your OpenXR runtime is set correctly and that tracking app/VR streaming server/VR app commands exist."
+        )
+        box.pack_start(hint, False, False, 0)
+
+        return self.wrap_scroller(box)
+
+    def refresh_status(self):
+        rc, s = systemctl_user("is-active", "vr-stack-control.service")
+        svc_active = (rc == 0 and s == "active")
+        self.lbl_service.set_text("RUNNING" if svc_active else "STOPPED")
+        # GUI-scoped autostart (starts the stack when this app opens)
+        auto_on_open = bool(self.state.get('autostart_on_open', False))
+        self.lbl_autostart.set_text('ON APP OPEN' if auto_on_open else 'OFF')
+
+        # Keep the quickbar toggle in sync
+        try:
+            self._updating_autostart = True
+            if hasattr(self, 'btn_quick_autostart'):
+                self.btn_quick_autostart.set_active(auto_on_open)
+        finally:
+            self._updating_autostart = False
+
+        self.lbl_profile.set_text(self.cfg.get("profile", "default"))
+
+
+        t = s = v = None
+        # Live process detection (best-effort)
+        try:
+            tracking_pat = self.cfg.get("tracking_ready") or self.name_tracking
+            server_pat = self.cfg.get("server_pgrep") or self.name_server
+            vr_pat = self.cfg.get("vr_pgrep") or self.name_vr
+
+            t = pgrep_first(tracking_pat)
+            s = pgrep_first(server_pat)
+            v = pgrep_first(vr_pat)
+
+            def fmt(x):
+                if not x:
+                    return "Not detected"
+                pid, cmd = x
+                # keep it short
+                short = cmd
+                if len(short) > 80:
+                    short = short[:77] + "..."
+                return f"PID {pid}: {short}"
+
+            if hasattr(self, "lbl_tracking_proc"):
+                self.lbl_tracking_proc.set_text(fmt(t))
+            if hasattr(self, "lbl_server_proc"):
+                self.lbl_server_proc.set_text(fmt(s))
+            if hasattr(self, "lbl_vr_proc"):
+                self.lbl_vr_proc.set_text(fmt(v))
+
+            note = ""
+            if v and not s:
+                note = f"⚠ {self.name_vr} is running but {self.name_server} was not detected. Usually you want the server running before the VR app."
+            elif s and not t:
+                note = f"⚠ {self.name_server} is running but {self.name_tracking} was not detected. Usually you start tracking first."
+            elif (t and s and v):
+                note = "✓ All three parts are running. Expected order is 1→2→3."
+            else:
+                note = ""
+
+            if hasattr(self, "lbl_order_note"):
+                self.lbl_order_note.set_text(note)
+        except Exception:
+            # Don't break the UI if pgrep is missing or patterns are invalid
+            if hasattr(self, "lbl_order_note"):
+                self.lbl_order_note.set_text("")
+
+        stack_running = svc_active or bool(t or s or v)
+        self.stack_running = stack_running
+        self.update_quick_controls(stack_running)
+
+        self.last_refresh = time.time()
+        return True
+
+    # ---------------- Apps & Settings ----------------
+    def build_apps_view(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+
+        box.pack_start(self.section_header("What gets launched"), False, False, 0)
+
+        grid = Gtk.Grid(column_spacing=10, row_spacing=8)
+        box.pack_start(grid, False, False, 0)
+
+        self.entry_tracking_cmd = Gtk.Entry()
+        self.entry_server_cmd = Gtk.Entry()
+        self.entry_vr_cmd = Gtk.Entry()
+        self.entry_tracking_ready = Gtk.Entry()
+        self.entry_server_pgrep = Gtk.Entry()
+        self.entry_vr_pgrep = Gtk.Entry()
+
+        self.entry_tracking_cmd.set_text(self.cfg["tracking_cmd"])
+        self.entry_server_cmd.set_text(self.cfg["server_cmd"])
+        self.entry_vr_cmd.set_text(self.cfg["vr_cmd"])
+        self.entry_tracking_ready.set_text(self.cfg["tracking_ready"])
+        self.entry_server_pgrep.set_text(self.cfg["server_pgrep"])
+        self.entry_vr_pgrep.set_text(self.cfg["vr_pgrep"])
+
+        r = 0
+        r = self._grid_entry(grid, r, "Tracking command", self.entry_tracking_cmd,
+                             "Started first. Your tracking software (binary, script, or AppImage).")
+        r = self._grid_entry(grid, r, "Tracking ready pattern", self.entry_tracking_ready,
+                             "We wait for this to appear in process list before starting VR streaming server.")
+        r = self._grid_entry(grid, r, "Server command", self.entry_server_cmd,
+                             "Started second. Your VR streaming server.")
+        r = self._grid_entry(grid, r, "Server pgrep pattern", self.entry_server_pgrep,
+                             "Used to detect if the server is already running (avoid duplicates).")
+        r = self._grid_entry(grid, r, "VR app command", self.entry_vr_cmd,
+                             "Started last. Your PC VR app (OpenXR).")
+        r = self._grid_entry(grid, r, "VR app pgrep pattern", self.entry_vr_pgrep,
+                             "Used to detect if your VR app is already running.")
+
+        btn_row = Gtk.Box(spacing=10)
+        box.pack_start(btn_row, False, False, 0)
+
+        btn_save = Gtk.Button(label="Save settings")
+        btn_save.set_image(Gtk.Image.new_from_icon_name("document-save", Gtk.IconSize.BUTTON))
+        btn_save.set_always_show_image(True)
+        btn_save.connect("clicked", lambda *_: self.on_save_settings())
+
+        btn_defaults = Gtk.Button(label="Reset to defaults")
+        btn_defaults.set_image(Gtk.Image.new_from_icon_name("edit-undo", Gtk.IconSize.BUTTON))
+        btn_defaults.set_always_show_image(True)
+        btn_defaults.connect("clicked", lambda *_: self.on_reset_defaults())
+
+        btn_row.pack_start(btn_save, False, False, 0)
+        btn_row.pack_start(btn_defaults, False, False, 0)
+
+        help_block = Gtk.Label(xalign=0)
+        help_block.set_line_wrap(True)
+        help_block.set_text(
+            "Why this matters: these commands are exactly what your start script / systemd service launches. "
+            "If a command is wrong, the stack will fail or start the wrong thing. The pgrep patterns prevent duplicate launches."
+        )
+        box.pack_start(help_block, False, False, 0)
+
+        return self.wrap_scroller(box)
+
+    def on_save_settings(self):
+        self.cfg["tracking_cmd"] = self.entry_tracking_cmd.get_text().strip()
+        self.cfg["server_cmd"] = self.entry_server_cmd.get_text().strip()
+        self.cfg["vr_cmd"] = self.entry_vr_cmd.get_text().strip()
+        self.cfg["tracking_ready"] = self.entry_tracking_ready.get_text().strip()
+        self.cfg["server_pgrep"] = self.entry_server_pgrep.get_text().strip()
+        self.cfg["vr_pgrep"] = self.entry_vr_pgrep.get_text().strip()
+        cfg_save(self.cfg)
+        info_dialog(self, "Saved", f"Saved to {STACK_CONF}")
+        self.refresh_status()
+
+    def on_reset_defaults(self):
+        if not confirm_dialog(self, "Reset to defaults?", "This will overwrite your current commands and patterns."):
+            return
+        for k, v in DEFAULTS.items():
+            self.cfg[k] = v
+        self.entry_tracking_cmd.set_text(self.cfg["tracking_cmd"])
+        self.entry_server_cmd.set_text(self.cfg["server_cmd"])
+        self.entry_vr_cmd.set_text(self.cfg["vr_cmd"])
+        self.entry_tracking_ready.set_text(self.cfg["tracking_ready"])
+        self.entry_server_pgrep.set_text(self.cfg["server_pgrep"])
+        self.entry_vr_pgrep.set_text(self.cfg["vr_pgrep"])
+        cfg_save(self.cfg)
+        info_dialog(self, "Reset", "Defaults restored.")
+        self.refresh_status()
+
+    # ---------------- Actions ----------------
+    def build_actions_view(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+
+        box.pack_start(self.section_header("One-click actions"), False, False, 0)
+
+        grid = Gtk.Grid(column_spacing=10, row_spacing=8)
+        box.pack_start(grid, False, False, 0)
+
+        # Stack + tray
+        self.combo_stack = Gtk.ComboBoxText()
+        for k, label in (
+            ("none", "Do nothing"),
+            ("start", "Start stack"),
+            ("restart", "Restart stack"),
+            ("stop", "Stop stack"),
+            ("enable", "Enable autostart"),
+            ("disable", "Disable autostart"),
+        ):
+            self.combo_stack.append(k, label)
+
+        # App settings actions (these are "safe" UI actions)
+        self.combo_tracking = Gtk.ComboBoxText()
+        self.combo_server = Gtk.ComboBoxText()
+        self.combo_vr = Gtk.ComboBoxText()
+        self.combo_patterns = Gtk.ComboBoxText()
+
+        for combo in (self.combo_tracking, self.combo_server, self.combo_vr, self.combo_patterns):
+            combo.append("none", "Do nothing")
+            combo.append("edit", "Edit settings (jump to Apps & Settings)")
+            combo.append("reset", "Reset to defaults")
+
+        # restore last selections
+        self._combo_set(self.combo_stack, self.state.get("action_stack", "none"))
+        self._combo_set(self.combo_tracking, self.state.get("action_tracking", "none"))
+        self._combo_set(self.combo_server, self.state.get("action_server", "none"))
+        self._combo_set(self.combo_vr, self.state.get("action_vr", "none"))
+        self._combo_set(self.combo_patterns, self.state.get("action_patterns", "none"))
+
+        for name, combo in (
+            ("action_stack", self.combo_stack),
+            ("action_tracking", self.combo_tracking),
+            ("action_server", self.combo_server),
+            ("action_vr", self.combo_vr),
+            ("action_patterns", self.combo_patterns),
+        ):
+            combo.connect("changed", lambda c, n=name: self.on_combo_changed(n, c))
+
+        r = 0
+        r = self._grid_row_combo(grid, r, "VR stack", self.combo_stack, "Start/stop the VR stack service (launches tracking app → VR streaming server → VR app in order).")
+        r = self._grid_row_combo(grid, r, "Tracking settings", self.combo_tracking, "Tracking app settings (usually tracking app). Change this if you moved/renamed the tracking app AppImage or want a different tracker app.")
+        r = self._grid_row_combo(grid, r, "Server settings", self.combo_server, "VR streaming server server settings (streams VR to your Quest). Change only if you installed VR streaming server somewhere unusual.")
+        r = self._grid_row_combo(grid, r, "VR app settings", self.combo_vr, "VR app settings (usually VR app). This is the app that opens on your PC and uses OpenXR.")
+        r = self._grid_row_combo(grid, r, "Patterns", self.combo_patterns, "How the app checks what is running (advanced). Leave this alone unless detection is wrong.")
+
+        btn_row = Gtk.Box(spacing=10)
+        box.pack_start(btn_row, False, False, 0)
+
+        btn_apply = Gtk.Button(label="Apply")
+        btn_apply.set_image(Gtk.Image.new_from_icon_name("system-run", Gtk.IconSize.BUTTON))
+        btn_apply.set_always_show_image(True)
+        btn_apply.connect("clicked", lambda *_: self.on_apply_actions())
+
+        btn_row.pack_start(btn_apply, False, False, 0)
+
+        hint = Gtk.Label(xalign=0)
+        hint.set_line_wrap(True)
+        hint.set_text(
+            "Selections are saved automatically. If you close and reopen the GUI, your dropdown choices will still be set."
+        )
+        box.pack_start(hint, False, False, 0)
+
+        return self.wrap_scroller(box)
+
+    def on_combo_changed(self, key, combo: Gtk.ComboBoxText):
+        self.state[key] = combo.get_active_id() or "none"
+        state_save(self.state)
+
+    def on_apply_actions(self):
+        choices = {
+            "Stack": self.combo_stack.get_active_text(),
+            "Tracking": self.combo_tracking.get_active_text(),
+            "Server": self.combo_server.get_active_text(),
+            "VR app": self.combo_vr.get_active_text(),
+            "Patterns": self.combo_patterns.get_active_text(),
+        }
+        summary = "\n".join([f"{k}: {v}" for k, v in choices.items()])
+        if not confirm_dialog(self, "Apply these actions?", summary):
+            return
+
+        # stack + tray actions (systemd)
+        self.apply_systemd_action("vr-stack-control.service", self.combo_stack.get_active_id())
+        
+        # app settings actions
+        self.apply_settings_action(self.combo_tracking.get_active_id(), scope="tracking")
+        self.apply_settings_action(self.combo_server.get_active_id(), scope="server")
+        self.apply_settings_action(self.combo_vr.get_active_id(), scope="vr")
+        self.apply_settings_action(self.combo_patterns.get_active_id(), scope="patterns")
+
+        self.refresh_status()
+        info_dialog(self, "Done", "Actions applied.")
+
+    def apply_systemd_action(self, unit: str, action: str):
+        if action in (None, "none"):
+            return
+        if action == "start":
+            systemctl_user("start", unit)
+        elif action == "stop":
+            systemctl_user("stop", unit)
+        elif action == "restart":
+            systemctl_user("restart", unit)
+        elif action == "enable":
+            systemctl_user("enable", unit)
+        elif action == "disable":
+            systemctl_user("disable", unit)
+
+    def apply_settings_action(self, action: str, scope: str):
+        if action in (None, "none"):
+            return
+        if action == "edit":
+            self.stack.set_visible_child_name("apps")
+            return
+        if action == "reset":
+            if scope == "tracking":
+                self.cfg["tracking_cmd"] = DEFAULTS["tracking_cmd"]
+                self.cfg["tracking_ready"] = DEFAULTS["tracking_ready"]
+                self.entry_tracking_cmd.set_text(self.cfg["tracking_cmd"])
+                self.entry_tracking_ready.set_text(self.cfg["tracking_ready"])
+            elif scope == "server":
+                self.cfg["server_cmd"] = DEFAULTS["server_cmd"]
+                self.cfg["server_pgrep"] = DEFAULTS["server_pgrep"]
+                self.entry_server_cmd.set_text(self.cfg["server_cmd"])
+                self.entry_server_pgrep.set_text(self.cfg["server_pgrep"])
+            elif scope == "vr":
+                self.cfg["vr_cmd"] = DEFAULTS["vr_cmd"]
+                self.cfg["vr_pgrep"] = DEFAULTS["vr_pgrep"]
+                self.entry_vr_cmd.set_text(self.cfg["vr_cmd"])
+                self.entry_vr_pgrep.set_text(self.cfg["vr_pgrep"])
+            elif scope == "patterns":
+                self.cfg["tracking_ready"] = DEFAULTS["tracking_ready"]
+                self.cfg["server_pgrep"] = DEFAULTS["server_pgrep"]
+                self.cfg["vr_pgrep"] = DEFAULTS["vr_pgrep"]
+                self.entry_tracking_ready.set_text(self.cfg["tracking_ready"])
+                self.entry_server_pgrep.set_text(self.cfg["server_pgrep"])
+                self.entry_vr_pgrep.set_text(self.cfg["vr_pgrep"])
+            cfg_save(self.cfg)
+
+    # ---------------- Profiles ----------------
+    def build_profiles_view(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+
+        box.pack_start(self.section_header("Profiles"), False, False, 0)
+
+        top = Gtk.Box(spacing=10)
+        box.pack_start(top, False, False, 0)
+
+        self.combo_profile = Gtk.ComboBoxText()
+        self.refresh_profiles_combo()
+        self._combo_set(self.combo_profile, self.cfg.get("profile", "default"))
+
+        self.combo_profile.connect("changed", lambda *_: None)
+
+        btn_select = Gtk.Button(label="Set as active")
+        btn_select.set_image(Gtk.Image.new_from_icon_name("emblem-ok", Gtk.IconSize.BUTTON))
+        btn_select.set_always_show_image(True)
+        btn_select.connect("clicked", lambda *_: self.on_set_profile())
+
+        top.pack_start(Gtk.Label(label="Profile:", xalign=0), False, False, 0)
+        top.pack_start(self.combo_profile, False, False, 0)
+        top.pack_start(btn_select, False, False, 0)
+
+        # list + actions
+        self.profile_list = Gtk.ListBox()
+        self.profile_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        box.pack_start(self.profile_list, True, True, 0)
+
+        btns = Gtk.Box(spacing=10)
+        box.pack_start(btns, False, False, 0)
+
+        btn_new = Gtk.Button(label="New")
+        btn_new.set_image(Gtk.Image.new_from_icon_name("list-add", Gtk.IconSize.BUTTON))
+        btn_new.set_always_show_image(True)
+        btn_new.connect("clicked", lambda *_: self.on_new_profile())
+
+        btn_rename = Gtk.Button(label="Rename")
+        btn_rename.set_image(Gtk.Image.new_from_icon_name("edit-rename", Gtk.IconSize.BUTTON))
+        btn_rename.set_always_show_image(True)
+        btn_rename.connect("clicked", lambda *_: self.on_rename_profile())
+
+        btn_delete = Gtk.Button(label="Delete")
+        btn_delete.set_image(Gtk.Image.new_from_icon_name("edit-delete", Gtk.IconSize.BUTTON))
+        btn_delete.set_always_show_image(True)
+        btn_delete.connect("clicked", lambda *_: self.on_delete_profile())
+
+        btn_edit = Gtk.Button(label="Edit")
+        btn_edit.set_image(Gtk.Image.new_from_icon_name("document-edit", Gtk.IconSize.BUTTON))
+        btn_edit.set_always_show_image(True)
+        btn_edit.connect("clicked", lambda *_: self.on_edit_profile())
+
+        btns.pack_start(btn_new, False, False, 0)
+        btns.pack_start(btn_edit, False, False, 0)
+        btns.pack_start(btn_rename, False, False, 0)
+        btns.pack_start(btn_delete, False, False, 0)
+
+        help_block = Gtk.Label(xalign=0)
+        help_block.set_line_wrap(True)
+        help_block.set_text(
+            "Profiles let you save different app commands/patterns for different setups (e.g. VR streaming server vs something else). "
+            "This GUI stores profiles as simple .conf files under ~/.config/vr-stack/profiles/."
+        )
+        box.pack_start(help_block, False, False, 0)
+
+        self.refresh_profiles_list()
+        return self.wrap_scroller(box)
+
+    def profiles(self):
+        files = sorted(PROFILES_DIR.glob("*.conf"))
+        out = []
+        for f in files:
+            out.append((f.stem, f))
+        # ensure default exists
+        default_path = PROFILES_DIR / "default.conf"
+        if not default_path.exists():
+            write_kv(default_path, DEFAULTS.copy())
+        if ("default", default_path) not in out:
+            out.insert(0, ("default", default_path))
+        return out
+
+    def refresh_profiles_combo(self):
+        self.combo_profile.remove_all()
+        for name, _ in self.profiles():
+            self.combo_profile.append(name, name)
+
+    def refresh_profiles_list(self):
+        for row in list(self.profile_list.get_children()):
+            self.profile_list.remove(row)
+        for name, path in self.profiles():
+            row = Gtk.ListBoxRow()
+            h = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            row.add(h)
+            lbl = Gtk.Label(label=name, xalign=0)
+            sub = Gtk.Label(label=str(path), xalign=0)
+            sub.get_style_context().add_class("dim-label")
+            v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            v.pack_start(lbl, False, False, 0)
+            v.pack_start(sub, False, False, 0)
+            h.pack_start(v, True, True, 0)
+            row.profile_name = name
+            row.profile_path = path
+            self.profile_list.add(row)
+        self.profile_list.show_all()
+
+    def selected_profile_row(self):
+        return self.profile_list.get_selected_row()
+
+    def on_set_profile(self):
+        name = self.combo_profile.get_active_id() or "default"
+        self.cfg["profile"] = name
+        cfg_save(self.cfg)
+        self.refresh_status()
+        info_dialog(self, "Profile set", f"Active profile set to: {name}\n\nNote: your start script/service must load and apply the profile file for this to affect launches.")
+
+    def ask_text(self, title, prompt, initial=""):
+        d = Gtk.Dialog(title, self, 0, ("Cancel", Gtk.ResponseType.CANCEL, "OK", Gtk.ResponseType.OK))
+        box = d.get_content_area()
+        box.set_spacing(8)
+        box.pack_start(Gtk.Label(label=prompt, xalign=0), False, False, 0)
+        entry = Gtk.Entry()
+        entry.set_text(initial)
+        box.pack_start(entry, False, False, 0)
+        d.show_all()
+        rc = d.run()
+        txt = entry.get_text().strip()
+        d.destroy()
+        if rc == Gtk.ResponseType.OK and txt:
+            return txt
+        return None
+
+    def on_new_profile(self):
+        name = self.ask_text("New profile", "Profile name (letters/numbers/dash):")
+        if not name:
+            return
+        path = PROFILES_DIR / f"{name}.conf"
+        if path.exists():
+            info_dialog(self, "Exists", "That profile already exists.")
+            return
+        write_kv(path, DEFAULTS.copy())
+        self.refresh_profiles_combo()
+        self.refresh_profiles_list()
+        self._combo_set(self.combo_profile, name)
+        info_dialog(self, "Created", f"Created {path}")
+
+    def on_rename_profile(self):
+        row = self.selected_profile_row()
+        if not row:
+            info_dialog(self, "No selection", "Select a profile first.")
+            return
+        if row.profile_name == "default":
+            info_dialog(self, "Not allowed", "You can't rename the default profile.")
+            return
+        newname = self.ask_text("Rename profile", "New name:", row.profile_name)
+        if not newname:
+            return
+        newpath = PROFILES_DIR / f"{newname}.conf"
+        if newpath.exists():
+            info_dialog(self, "Exists", "A profile with that name already exists.")
+            return
+        row.profile_path.rename(newpath)
+        # update active profile if needed
+        if self.cfg.get("profile") == row.profile_name:
+            self.cfg["profile"] = newname
+            cfg_save(self.cfg)
+        self.refresh_profiles_combo()
+        self.refresh_profiles_list()
+        self._combo_set(self.combo_profile, self.cfg.get("profile", "default"))
+
+    def on_delete_profile(self):
+        row = self.selected_profile_row()
+        if not row:
+            info_dialog(self, "No selection", "Select a profile first.")
+            return
+        if row.profile_name == "default":
+            info_dialog(self, "Not allowed", "You can't delete the default profile.")
+            return
+        if not confirm_dialog(self, "Delete profile?", f"Delete {row.profile_name} ?\n{row.profile_path}"):
+            return
+        try:
+            row.profile_path.unlink()
+        except Exception as e:
+            info_dialog(self, "Error", str(e))
+        if self.cfg.get("profile") == row.profile_name:
+            self.cfg["profile"] = "default"
+            cfg_save(self.cfg)
+        self.refresh_profiles_combo()
+        self.refresh_profiles_list()
+        self._combo_set(self.combo_profile, self.cfg.get("profile", "default"))
+        self.refresh_status()
+
+    def on_edit_profile(self):
+        row = self.selected_profile_row()
+        if not row:
+            info_dialog(self, "No selection", "Select a profile first.")
+            return
+        # Use editor if set, else xdg-open
+        editor = os.environ.get("EDITOR")
+        if editor:
+            subprocess.Popen([editor, str(row.profile_path)])
+        else:
+            subprocess.Popen(["xdg-open", str(row.profile_path)])
+
+    # ---------------- Debug ----------------
+    def build_debug_view(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.pack_start(self.section_header("Debug"), False, False, 0)
+
+        self.txt_debug = Gtk.TextView()
+        self.txt_debug.set_editable(False)
+        self.txt_debug.set_monospace(True)
+
+        btn_row = Gtk.Box(spacing=10)
+        btn_refresh = Gtk.Button(label="Refresh")
+        btn_refresh.set_image(Gtk.Image.new_from_icon_name("view-refresh", Gtk.IconSize.BUTTON))
+        btn_refresh.set_always_show_image(True)
+        btn_refresh.connect("clicked", lambda *_: self.refresh_debug())
+        btn_row.pack_start(btn_refresh, False, False, 0)
+
+        box.pack_start(btn_row, False, False, 0)
+        box.pack_start(self.wrap_scroller(self.txt_debug), True, True, 0)
+
+        self.refresh_debug()
+        return box
+
+    def refresh_debug(self):
+        lines = []
+        lines.append(f"Version: {APP_VERSION}")
+        lines.append(f"Config: {STACK_CONF}")
+        lines.append(f"Profiles: {PROFILES_DIR}")
+        lines.append(f"GUI state: {GUI_STATE}")
+        lines.append("")
+        lines.append("systemctl --user status vr-stack-control.service")
+        rc, out = systemctl_user("status", "vr-stack-control.service", "--no-pager", "-l")
+        lines.append(out)
+        lines.append("")
+
+        buf = self.txt_debug.get_buffer()
+        buf.set_text("\n".join(lines))
+
+    # ---------------- helpers ----------------
+    def section_header(self, text):
+        lbl = Gtk.Label()
+        lbl.set_markup(f"<span size='x-large' weight='bold'>{GLib.markup_escape_text(text)}</span>")
+        lbl.set_xalign(0)
+        return lbl
+
+    def small_muted(self, text):
+        # Small, muted left-aligned label (for table headings / hints)
+        safe = GLib.markup_escape_text(str(text))
+        lbl = Gtk.Label()
+        lbl.set_xalign(0)
+        lbl.set_use_markup(True)
+        lbl.set_markup(f"<span size='small' alpha='700'>{safe}</span>")
+        return lbl
+
+    def value_label(self, text, monospace=False):
+        lbl = Gtk.Label(label=str(text))
+        lbl.set_xalign(0)
+        lbl.set_yalign(0.5)
+        lbl.set_selectable(True)
+        lbl.set_hexpand(True)
+        lbl.set_line_wrap(True)
+        lbl.set_max_width_chars(80)
+        if monospace:
+            try:
+                lbl.get_style_context().add_class("monospace")
+            except Exception:
+                pass
+        return lbl
+
+
+    def wrap_scroller(self, child):
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        sw.add(child)
+        return sw
+
+    def _grid_row(self, grid, row, label, widget):
+        l = Gtk.Label(label=label, xalign=0)
+        grid.attach(l, 0, row, 1, 1)
+        grid.attach(widget, 1, row, 1, 1)
+
+    def _grid_row_combo(self, grid, row, label, combo, why):
+        l = Gtk.Label(label=label, xalign=0)
+        grid.attach(l, 0, row, 1, 1)
+        grid.attach(combo, 1, row, 1, 1)
+        w = Gtk.Label(label=why, xalign=0)
+        w.set_line_wrap(True)
+        w.get_style_context().add_class("dim-label")
+        grid.attach(w, 2, row, 1, 1)
+        return row + 1
+
+    def _grid_entry(self, grid, row, label, entry, why):
+        l = Gtk.Label(label=label, xalign=0)
+        grid.attach(l, 0, row, 1, 1)
+        grid.attach(entry, 1, row, 1, 1)
+        w = Gtk.Label(label=why, xalign=0)
+        w.set_line_wrap(True)
+        w.get_style_context().add_class("dim-label")
+        grid.attach(w, 2, row, 1, 1)
+        return row + 1
+
+    def _combo_set(self, combo: Gtk.ComboBoxText, key: str):
+        try:
+            combo.set_active_id(key)
+        except Exception:
+            combo.set_active(0)
+
+
+def main():
+    win = VRControlApp()
+    win.connect("destroy", Gtk.main_quit)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

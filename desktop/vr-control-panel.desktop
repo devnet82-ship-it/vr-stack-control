@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=VR Stack Control
+Comment=GUI for managing modular VR stacks via systemd --user
+Exec=/usr/bin/env bash -lc "vr-control --gui"
+Icon=video-display
+Terminal=false
+Type=Application
+Categories=Graphics;VR;
+StartupNotify=false

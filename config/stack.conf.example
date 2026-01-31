@@ -1,0 +1,11 @@
+# VR Stack configuration (bash-sourced)
+TRACK_CMD="/opt/slimevr/slimevr"
+TRACK_READY_PGREP="slimevr\.jar"
+
+SERVER_CMD="wivrn-server"
+SERVER_PGREP="wivrn-server"
+
+VR_CMD="wayvr"
+VR_PGREP="(^|/)(wayvr)(\s|$)"
+
+OPENXR_JSON="/usr/share/openxr/1/openxr_wivrn.json"

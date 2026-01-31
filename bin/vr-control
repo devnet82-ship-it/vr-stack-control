@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+APP_VERSION="v0.6.21"
+
+usage() {
+  cat <<'USAGE'
+VR Stack Control v0.6.21
+
+Usage:
+  vr-control --gui            Open the GTK control panel (default)
+  vr-control start            Start the VR stack via systemd --user
+  vr-control stop             Stop the VR stack via systemd --user
+  vr-control restart          Restart the VR stack via systemd --user
+  vr-control status           Show service status
+  vr-control logs             Follow logs for vr-stack-control.service
+  vr-control --version        Print version
+  vr-control --help           Show this help
+USAGE
+}
+
+# Default behavior: open GUI
+if [[ ${1-} == "" || ${1-} == "--gui" || ${1-} == "gui" ]]; then
+  shift || true
+  exec "${HOME}/.local/bin/vr-control-gui" "$@"
+fi
+
+case "${1-}" in
+  --help|-h)
+    usage
+    ;;
+  --version|-V|version)
+    echo "$APP_VERSION"
+    ;;
+  start)
+    exec systemctl --user start vr-stack-control.service
+    ;;
+  stop)
+    exec systemctl --user stop vr-stack-control.service
+    ;;
+  restart)
+    exec systemctl --user restart vr-stack-control.service
+    ;;
+  status)
+    exec systemctl --user status vr-stack-control.service --no-pager -l
+    ;;
+  logs)
+    exec journalctl --user -fu vr-stack-control.service
+    ;;
+  *)
+    echo "Unknown command: ${1-}" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
