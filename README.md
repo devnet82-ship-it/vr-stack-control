@@ -30,7 +30,7 @@ vr-control --gui
 Note: Tray integration was removed in v0.6.21. Closing the window exits normally.
 
 
-WI VRN + WAYVR + SLIMEVR ON CACHYOS (QUEST 3)
+## WI VRN + WAYVR + SLIMEVR ON CACHYOS (QUEST 3)
 COMPLETE FIRST-TIME SETUP GUIDE
 
 This is the exact process that was followed to get a fully working
@@ -69,7 +69,7 @@ REQUIREMENTS
 - Internet access
 
 
-PART 1 — INSTALL PC SOFTWARE
+## PART 1 — INSTALL PC SOFTWARE
 
 Run exactly:
 
@@ -98,7 +98,7 @@ command -v slimevr
 If any command is missing, stop and fix it before continuing.
 
 
-PART 2 — QUEST DEVELOPER MODE + ADB
+## PART 2 — QUEST DEVELOPER MODE + ADB
 
 Enable developer mode (phone):
 
@@ -140,7 +140,7 @@ XXXXXXXXXXXX    device
 If not, stop and fix before continuing.
 
 
-PART 3 — DOWNLOAD AND INSTALL QUEST APK
+## PART 3 — DOWNLOAD AND INSTALL QUEST APK
 
 Login to GitHub CLI:
 
@@ -204,7 +204,7 @@ Inside Quest WiVRn app:
 - Let SlimeVR / SolarXR provide tracking
 
 
-PART 4 — FIX OPENXR RUNTIME (CRITICAL STEP)
+## PART 4 — FIX OPENXR RUNTIME (CRITICAL STEP)
 
 Run:
 
