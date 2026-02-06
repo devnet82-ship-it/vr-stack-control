@@ -1,3 +1,4 @@
+# wivrn-stack-control v0.6.53
 #!/usr/bin/env bash
 set -e
 
