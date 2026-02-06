@@ -1,4 +1,4 @@
-# VR Stack Control v0.6.52
+# VR Stack Control v0.6.53
 
 This release replaces your old `vr-control --gui` YAD UI with a GTK GUI.
 
@@ -30,7 +30,7 @@ vr-control --gui
 
 Note: Tray integration was removed in v0.6.30. Closing the window exits normally.
 
-## v0.6.52 change
+## v0.6.53 change
 
 - Apps & Settings now shows **Detected paths (read-only)** so you can verify where OpenXR / SteamVR / XRizer are found.
 
