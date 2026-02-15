@@ -17,10 +17,9 @@ VR on Linux can break when OpenXR and OpenVR state gets stuck:
 - switching between WiVRn and SteamVR does not snap back
 
 VR Stack Control makes switching predictable:
-- WiVRn mode clears the user OpenXR override
-- WiVRn mode closes Steam and SteamVR on switch
-- SteamVR mode sets the user OpenXR override to SteamVR
-- OpenVR paths are repaired and normalized when needed
+- WiVRn mode clears the user OpenXR override and makes sure Steam and SteamVR are closed
+- SteamVR mode sets the user OpenXR override to SteamVR (when you choose SteamVR)
+- OpenVR paths can be repaired and normalized when needed
 - One button start and stop with correct ordering
 
 ---
@@ -55,9 +54,14 @@ vr-control --gui
 vr-control doctor
 ```
 
+Expected in WiVRn mode:
+- OpenXR runtime name: Monado
+- OpenXR library includes libopenxr_wivrn
+- SteamVR processes: not running
+
 ---
 
-# Quest 3 on CachyOS
+# Quest 3 on CachyOS (Wayland)
 ## WiVRn (BETA) + SlimeVR (BETA) + WayVR using VR Stack Control
 
 This is the setup that worked on CachyOS + Quest 3.
@@ -71,12 +75,13 @@ SlimeVR (beta) → WiVRn server → Quest WiVRn app → WayVR → game
 - Meta Quest 3 (Developer Mode enabled)
 - USB cable for one time ADB setup
 - PC and headset on the same network
+- Internet access (for AUR and GitHub artifacts)
 
 ---
 
-## Part 1 — Install PC software (beta and dev builds)
+## 1) Install PC software (beta and dev builds)
 
-### 1) Install an AUR helper (if you do not have one)
+### 1.1 Install an AUR helper (if you do not have one)
 If `yay` is missing:
 
 ```bash
@@ -86,19 +91,19 @@ cd yay
 makepkg -si
 ```
 
-### 2) Remove stable packages (if installed)
+### 1.2 Remove stable packages (if installed)
 
 ```bash
 sudo pacman -Rns wivrn-dashboard wivrn-server slimevr 2>/dev/null || true
 ```
 
-### 3) Install WiVRn dev build + SlimeVR beta build
+### 1.3 Install WiVRn dev build + SlimeVR beta build
 
 ```bash
 yay -S --needed wivrn-full-git slimevr-beta-bin
 ```
 
-### 4) Install the rest
+### 1.4 Install the rest
 
 ```bash
 sudo pacman -S --needed wayvr android-tools github-cli
@@ -114,9 +119,9 @@ command -v slimevr
 
 ---
 
-## Part 2 — OpenVR compatibility for SteamVR games (XRizer)
+## 2) OpenVR compatibility for SteamVR games (XRizer)
 
-WiVRn will warn if OpenVR compatibility is missing. Install XRizer:
+WiVRn warns if OpenVR compatibility is missing. Install XRizer:
 
 ```bash
 yay -S --needed xrizer-git xrizer-common-git lib32-xrizer-git
@@ -130,7 +135,7 @@ set -Ux VR_PATHREG_OVERRIDE $HOME/.local/share/openvr/openvrpaths.vrpath
 
 ---
 
-## Part 3 — Set system OpenXR runtime to WiVRn (recommended)
+## 3) Set system OpenXR runtime to WiVRn (recommended)
 
 VR Stack Control clears the user override when you select WiVRn.
 To make WiVRn the default fallback, set the system runtime to WiVRn:
@@ -142,16 +147,18 @@ sudo ln -sf /usr/share/openxr/1/openxr_wivrn.json /etc/openxr/1/active_runtime.j
 
 ---
 
-## Part 4 — Quest Developer Mode + ADB
+## 10) ADB setup (Quest 3)
 
-Enable Developer Mode in the Meta Quest phone app:
-Devices → Quest 3 → Developer Mode → ON
-Reboot the headset.
+This was a real blocker during setup: first ADB was missing, then the device was unauthorized, then it became device.
 
-Enable USB Debugging in the headset:
-Settings → System → Developer → USB Debugging
+### 10.1 Install ADB tools
 
-Connect and verify:
+```bash
+sudo pacman -S --needed android-tools
+adb version
+```
+
+### 10.2 Start ADB server and authorize Quest
 
 ```bash
 adb kill-server
@@ -159,44 +166,113 @@ adb start-server
 adb devices
 ```
 
-Accept the prompt in the headset and tick Always allow, then run again:
+On the Quest headset:
+- Enable Developer Mode (Meta phone app)
+- Plug USB
+- Accept the USB debugging prompt
+- Check Always allow
 
-```bash
-adb devices
+You want to end with:
+
+```text
+List of devices attached
+2G0YC5ZG4F08WM  device
 ```
-
-You must see: `XXXXXXXXXXXX    device`
 
 ---
 
-## Part 5 — Install the WiVRn Quest APK (beta) from GitHub Actions
+## 11) GitHub CLI (gh) install + authentication
 
-List recent runs:
+### 11.1 Install gh
 
 ```bash
-gh run list --repo WiVRn/WiVRn --limit 10
+sudo pacman -S --needed github-cli
 ```
 
-Pick the newest successful run ID and download the APK artifact (usually named `apk-Release`):
+### 11.2 Authenticate
 
 ```bash
-gh run download RUN_ID_HERE --repo WiVRn/WiVRn --name apk-Release
+gh auth login
+gh auth status
+```
+
+---
+
+## 12) Get the correct WiVRn Quest APK (the journey, correctly)
+
+This was the biggest blocker because:
+- Artifacts were not visible in the browser
+- wrong workflow runs (docs or debugging PR runs)
+- Release APK Only runs had jobs but no downloadable artifacts
+- stable releases do not match wivrn-full-git
+
+We needed the **Build** workflow artifacts.
+
+### 12.1 List workflows
+
+```bash
+gh workflow list --repo WiVRn/WiVRn
+```
+
+You should see something like:
+- Build (ID shown in the list)
+- Release APK Only
+- others
+
+### 12.2 List Build runs (this matters)
+
+Try master first (what was used during setup). If it returns nothing, try main.
+
+```bash
+gh run list --repo WiVRn/WiVRn --workflow "Build" --branch master --limit 10
+gh run list --repo WiVRn/WiVRn --workflow "Build" --branch main --limit 10
+```
+
+Example run used during setup:
+- 21321590049
+
+### 12.3 View the run and confirm artifacts
+
+```bash
+gh run view 21321590049 --repo WiVRn/WiVRn
+```
+
+You should see artifacts like:
+- apk-Release
+- apk-Debug
+
+### 12.4 Download the Quest Release APK artifact (key step)
+
+```bash
+gh run download 21321590049 --repo WiVRn/WiVRn --name apk-Release
+```
+
+### 12.5 Extract
+
+```bash
 unzip -o *.zip
-ls *.apk
+ls -la *.apk
 ```
 
-Install to Quest:
+### 12.6 Install the APK to Quest (ADB)
+
+First uninstall the old or store WiVRn on the Quest (avoid incompatible update):
+
+On Quest:
+- Settings → Apps → WiVRn → Uninstall
+- Reboot headset
+
+Then on PC:
 
 ```bash
 adb install -r *.apk
-adb shell pm list packages | grep -i wivrn
 ```
 
-If you use SlimeVR for body tracking, set WiVRn app body tracking to off to avoid conflicts.
+Reboot Quest again after install.
 
 ---
 
-## Part 6 — Run everything using VR Stack Control
+## 13) Run everything using VR Stack Control
 
 Open the GUI:
 
@@ -217,7 +293,26 @@ systemctl --user stop vr-stack-control.service
 journalctl --user -fu vr-stack-control.service
 ```
 
-Quick sanity check:
+---
+
+# Troubleshooting
+
+## Steam or SteamVR opens when switching back to WiVRn
+- In VR Stack Control select **WiVRn (Native / Quest streaming)** again.
+- WiVRn mode should close Steam and SteamVR automatically.
+- If Steam is still running, close it manually and retry.
+
+## WiVRn does not connect / headset does not appear
+- Make sure Quest and PC are on the same network.
+- Open the WiVRn app on the headset and connect to the PC.
+- Check logs:
+
+```bash
+journalctl --user -fu vr-stack-control.service
+```
+
+## OpenXR runtime looks wrong / games start in the wrong runtime
+Run doctor:
 
 ```bash
 vr-control doctor
@@ -226,4 +321,34 @@ vr-control doctor
 Expected in WiVRn mode:
 - OpenXR runtime name: Monado
 - OpenXR library includes libopenxr_wivrn
-- SteamVR processes: not running
+
+Expected in SteamVR mode:
+- OpenXR runtime name: SteamVR
+- OpenXR library points into your SteamVR folder
+
+If it is stuck on SteamVR when you want WiVRn:
+- Ensure `~/.config/openxr/1/active_runtime.json` is missing (WiVRn mode clears it)
+- Ensure system OpenXR runtime is set to WiVRn (see Part 3)
+
+## ADB shows "unauthorized"
+- Put the headset on, re-plug USB, accept the prompt, tick Always allow.
+- Then run:
+
+```bash
+adb kill-server
+adb start-server
+adb devices
+```
+
+## SlimeVR trackers not working
+- Ensure you installed **slimevr-beta-bin** (not stable slimevr).
+- Start the stack with SlimeVR enabled in your profile.
+- If WiVRn has a body tracking option, turn it off when using SlimeVR to avoid conflicts.
+
+## OpenVR / Steam games do not see VR (XRizer)
+- Install XRizer packages (Part 2).
+- Ensure VR_PATHREG_OVERRIDE is set in fish:
+
+```fish
+set -Ux VR_PATHREG_OVERRIDE $HOME/.local/share/openvr/openvrpaths.vrpath
+```
