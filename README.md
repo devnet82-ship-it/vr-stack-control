@@ -26,6 +26,44 @@ VR Stack Control makes switching predictable:
 
 ## Install VR Stack Control (Release zip)
 
+## Where to get the beta builds (WiVRn + SlimeVR)
+
+These are the “beta/dev” sources we used on CachyOS for Quest 3.
+
+### WiVRn (PC) — dev build
+- Upstream repo: https://github.com/WiVRn/WiVRn
+- Docs/site: https://wivrn.github.io/
+- AUR (dev): https://aur.archlinux.org/packages/wivrn-full-git
+
+### WiVRn (Quest / headset app)
+**Option A (recommended):** WiVRn APK releases
+- Releases: https://github.com/WiVRn/WiVRn-APK/releases
+- Repo: https://github.com/WiVRn/WiVRn-APK
+
+**Option B (what we did):** GitHub Actions “Build” artifact using \`gh\`
+- Actions page: https://github.com/WiVRn/WiVRn/actions
+
+### SlimeVR (PC) — beta build
+- SlimeVR site: https://slimevr.dev/
+- Server repo: https://github.com/SlimeVR/SlimeVR-Server
+- AUR (beta): https://aur.archlinux.org/packages/slimevr-beta-bin
+
+### WayVR
+- Repo: https://github.com/wlx-team/wayvr
+- AUR: https://aur.archlinux.org/packages/wayvr  (or dev: https://aur.archlinux.org/packages/wayvr-git)
+
+### OpenVR compatibility (XRizer)
+- Repo: https://github.com/Supreeeme/xrizer
+- AUR: https://aur.archlinux.org/packages/xrizer-git
+- AUR 32-bit: https://aur.archlinux.org/packages/lib32-xrizer-git
+
+### VR Stack Control
+- Repo: https://github.com/devnet82-ship-it/wivrn-stack-control
+- Releases: https://github.com/devnet82-ship-it/wivrn-stack-control/releases
+
+---
+
+
 Download the v0.6.85 zip from GitHub Releases, then:
 
 ```bash
