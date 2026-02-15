@@ -1,6 +1,4 @@
-# VR Stack Control v0.6.53
-
-This release replaces your old `vr-control --gui` YAD UI with a GTK GUI.
+# VR Stack Control v0.6.85
 
 ## Install
 
